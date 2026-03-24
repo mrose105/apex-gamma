@@ -1,4 +1,4 @@
-# ⚡ APEX Gamma
+#  APEX Gamma
 
 **Precision 0DTE SPY options scanner and execution engine built on real-time Greeks.**
 
