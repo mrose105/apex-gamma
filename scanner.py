@@ -112,7 +112,8 @@ def build_chain_df(chain, spot, r=0.05):
             # Gamma arc signal
             peak = gamma_peaks[opt_type]
             gamma_val = bs["gamma"] if bs else 0
-            signal = ge.gamma_arc_signal(gamma_val, peak, moneyness, option_type=opt_type)
+            speed_val = bs["speed"] if bs else None
+            signal = ge.gamma_arc_signal(gamma_val, peak, moneyness, option_type=opt_type, speed=speed_val)
 
             rows.append({
                 "symbol":        symbol,

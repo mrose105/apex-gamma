@@ -60,12 +60,27 @@ def bs_greeks(S, K, r, sigma, option_type="call"):
     else:
         rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
 
+    # Speed — third derivative (rate of gamma change with spot)
+    speed = -(gamma / S) * (d1 / (sigma * np.sqrt(T)) + 1)
+
+    # Vanna — sensitivity of delta to IV (or gamma to spot cross partial)
+    vanna = -norm.pdf(d1) * d2 / sigma
+
+    # Charm — delta decay per day (how fast delta changes with time)
+    charm = -norm.pdf(d1) * (
+        (2 * (r) * T - d2 * sigma * np.sqrt(T)) /
+        (2 * T * sigma * np.sqrt(T))
+    ) / 365
+
     return {
         "delta": round(delta, 4),
         "gamma": round(gamma, 4),
         "theta": round(theta, 4),
         "vega":  round(vega, 4),
         "rho":   round(rho, 4),
+        "speed": round(speed, 6),
+        "vanna": round(vanna, 4),
+        "charm": round(charm, 6),
         "T":     round(T * 252 * 6.5, 4),  # hours remaining
     }
 
@@ -143,11 +158,14 @@ def pricing_edge(market_price, fair_value):
 
 # ── Gamma Arc Signals ────────────────────────────────────────────────
 
-def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call"):
+def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call", speed=None):
     """
     Returns entry/exit signal based on gamma arc logic.
-    moneyness = S / K (>1 = ITM for calls, <1 = ITM for puts)
+    moneyness  = S / K (>1 = ITM for calls, <1 = ITM for puts)
     option_type = "call" or "put"
+    speed      = dGamma/dS from bs_greeks — used to detect gamma peak before it happens
+                 positive = gamma still accelerating (hold/entry)
+                 negative = gamma decelerating (approaching exit)
     """
     if not current_gamma or not peak_gamma:
         return "HOLD"
@@ -159,8 +177,17 @@ def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call"):
         return "AVOID"
 
     if option_type == "call":
-        # Entry: call is slightly OTM, gamma building toward ATM
-        if config.ENTRY_MONEYNESS_THRESHOLD <= moneyness < 1.0:
+        is_slightly_otm = config.ENTRY_MONEYNESS_THRESHOLD <= moneyness < 1.0
+
+        # Speed-based early signal: detect gamma inflection before moneyness threshold
+        if speed is not None:
+            if speed > 0 and is_slightly_otm:
+                return "ENTRY"
+            if speed < 0 and moneyness > 0.999:
+                return "EXIT"
+
+        # Fallback moneyness-based logic
+        if is_slightly_otm:
             return "ENTRY"
 
         # Peak zone: at or just past ATM, gamma near max
@@ -172,8 +199,17 @@ def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call"):
             return "EXIT"
 
     else:  # put
-        # Entry: put is slightly OTM (spot just above strike), gamma building
-        if 1.0 < moneyness <= (1.0 / config.ENTRY_MONEYNESS_THRESHOLD):
+        is_slightly_otm = 1.0 < moneyness <= (1.0 / config.ENTRY_MONEYNESS_THRESHOLD)
+
+        # Speed-based early signal for puts
+        if speed is not None:
+            if speed > 0 and is_slightly_otm:
+                return "ENTRY"
+            if speed < 0 and moneyness < 1.001:
+                return "EXIT"
+
+        # Fallback moneyness-based logic
+        if is_slightly_otm:
             return "ENTRY"
 
         # Peak zone: at or just past ATM for puts
