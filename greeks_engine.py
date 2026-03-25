@@ -1,20 +1,24 @@
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
-from datetime import datetime, date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import config
+
+TZ_ET = ZoneInfo("America/New_York")
 
 # ── Black-Scholes Greeks ─────────────────────────────────────────────
 
-def time_to_expiry():
-    """Returns fraction of trading day remaining for 0DTE (in years)."""
-    now = datetime.now()
+def time_to_expiry() -> float:
+    """Returns fraction of trading year remaining for 0DTE (in years).
+    Uses ET timezone so the result is correct on any host machine.
+    """
+    now = datetime.now(TZ_ET)
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    total_day = (market_close - market_open).seconds
-    remaining = max((market_close - now).seconds, 60)  # floor at 1 min
-    trading_year = 252 * 6.5 * 3600
-    return remaining / trading_year
+    remaining_secs = max((market_close - now).total_seconds(), 60)  # floor at 1 min
+    trading_year = 252 * 6.5 * 3600  # seconds in a trading year
+    return remaining_secs / trading_year
+
 
 def bs_greeks(S, K, r, sigma, option_type="call"):
     """
@@ -29,49 +33,52 @@ def bs_greeks(S, K, r, sigma, option_type="call"):
     if T <= 0 or sigma <= 0:
         return None
 
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
+    sqrt_T = np.sqrt(T)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
 
     # Delta
     if option_type == "call":
         delta = norm.cdf(d1)
     else:
-        delta = norm.cdf(d1) - 1
+        delta = norm.cdf(d1) - 1  # = -N(-d1)
 
     # Gamma (same for calls and puts)
-    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+    gamma = norm.pdf(d1) / (S * sigma * sqrt_T)
 
-    # Theta (per day)
-    theta_call = (
-        -(S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
-        - r * K * np.exp(-r * T) * norm.cdf(d2)
-    ) / 365
+    # Theta (per calendar day, annualized with 365)
+    # Call:  -(S·N'(d1)·σ)/(2√T) - r·K·e^(-rT)·N(d2)
+    # Put:   -(S·N'(d1)·σ)/(2√T) + r·K·e^(-rT)·N(-d2)
+    disc = K * np.exp(-r * T)
+    common_theta = -(S * norm.pdf(d1) * sigma) / (2 * sqrt_T)
     if option_type == "call":
-        theta = theta_call
+        theta = (common_theta - r * disc * norm.cdf(d2)) / 365
     else:
-        theta = theta_call + r * K * np.exp(-r * T) / 365
+        theta = (common_theta + r * disc * norm.cdf(-d2)) / 365
 
     # Vega (per 1% move in IV)
-    vega = S * norm.pdf(d1) * np.sqrt(T) / 100
+    vega = S * norm.pdf(d1) * sqrt_T / 100
 
     # Rho (per 1% move in rates)
     if option_type == "call":
-        rho = K * T * np.exp(-r * T) * norm.cdf(d2) / 100
+        rho = disc * T * norm.cdf(d2) / 100
     else:
-        rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
+        rho = -disc * T * norm.cdf(-d2) / 100
 
-    # Speed — 3rd derivative of option price w.r.t. spot (d³V/dS³ = dGamma/dS)
-    # Positive: gamma still accelerating toward ATM (entry zone)
+    # Speed — dGamma/dS = d³V/dS³
+    # Positive: gamma accelerating toward ATM (entry zone)
     # Negative: gamma decelerating, peak passed (exit zone)
-    speed = -(gamma / S) * (d1 / (sigma * np.sqrt(T)) + 1)
+    speed = -(gamma / S) * (d1 / (sigma * sqrt_T) + 1)
 
-    # Vanna — sensitivity of delta to IV (or gamma to spot cross partial)
+    # Vanna — d²V/dSdσ  (= dDelta/dσ = dVega/dS)
+    # Canonical: -N'(d1)·d2/σ
     vanna = -norm.pdf(d1) * d2 / sigma
 
-    # Charm — delta decay per day (how fast delta changes with time)
+    # Charm — dDelta/dt per calendar day
+    # Canonical (no dividends): -N'(d1)·[2rT - d2·σ·√T] / (2T·σ·√T)
     charm = -norm.pdf(d1) * (
-        (2 * (r) * T - d2 * sigma * np.sqrt(T)) /
-        (2 * T * sigma * np.sqrt(T))
+        (2 * r * T - d2 * sigma * sqrt_T) /
+        (2 * T * sigma * sqrt_T)
     ) / 365
 
     return {
@@ -83,8 +90,9 @@ def bs_greeks(S, K, r, sigma, option_type="call"):
         "speed": round(speed, 6),
         "vanna": round(vanna, 4),
         "charm": round(charm, 6),
-        "T":     round(T * 252 * 6.5, 4),  # hours remaining
+        "T":     round(T * 252 * 6.5, 4),  # trading hours remaining
     }
+
 
 # ── Implied Volatility Solver ────────────────────────────────────────
 
@@ -92,6 +100,7 @@ def implied_vol(market_price, S, K, r, option_type="call", tol=1e-6):
     """
     Back-solve IV from market price using Brent's method.
     Returns None if price is outside arbitrage bounds or solver fails.
+    T is captured once and shared with fair_value_bs to avoid timestamp drift.
     """
     T = time_to_expiry()
     if T <= 0 or market_price <= 0:
@@ -103,13 +112,14 @@ def implied_vol(market_price, S, K, r, option_type="call", tol=1e-6):
         return None
 
     def objective(sigma):
-        return fair_value_bs(S, K, r, sigma, option_type) - market_price
+        return fair_value_bs(S, K, r, sigma, option_type, T=T) - market_price
 
     try:
         iv = brentq(objective, 1e-4, 20.0, xtol=tol, maxiter=200)
         return round(iv, 6)
     except Exception:
         return None
+
 
 # ── Broker Greeks (from Alpaca snapshot) ────────────────────────────
 
@@ -127,6 +137,7 @@ def broker_greeks(snapshot):
     except Exception:
         return None
 
+
 # ── Comparison & Fair Value ──────────────────────────────────────────
 
 def compare_greeks(bs, broker):
@@ -135,17 +146,26 @@ def compare_greeks(bs, broker):
         return None
     return {k: round(bs[k] - broker.get(k, 0), 4) for k in ["delta", "gamma", "theta", "vega", "rho"]}
 
-def fair_value_bs(S, K, r, sigma, option_type="call"):
-    """Theoretical BS price."""
-    T = time_to_expiry()
+
+def fair_value_bs(S, K, r, sigma, option_type="call", T=None):
+    """
+    Theoretical BS price.
+    Accepts optional T (years) so the IV solver and Greeks engine share
+    the same timestamp rather than each calling time_to_expiry() independently.
+    """
+    if T is None:
+        T = time_to_expiry()
     if T <= 0 or sigma <= 0:
         return None
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
+    sqrt_T = np.sqrt(T)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    disc = K * np.exp(-r * T)
     if option_type == "call":
-        return round(S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2), 4)
+        return round(S * norm.cdf(d1) - disc * norm.cdf(d2), 4)
     else:
-        return round(K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1), 4)
+        return round(disc * norm.cdf(-d2) - S * norm.cdf(-d1), 4)
+
 
 def pricing_edge(market_price, fair_value):
     """
@@ -157,6 +177,7 @@ def pricing_edge(market_price, fair_value):
     edge = round(market_price - fair_value, 4)
     pct  = round((edge / fair_value) * 100, 2) if fair_value else None
     return {"edge": edge, "edge_pct": pct}
+
 
 # ── Gamma Arc Signals ────────────────────────────────────────────────
 
