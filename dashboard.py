@@ -234,7 +234,112 @@ with col_right:
 
 st.divider()
 
+# ── 3D Surface Tab ───────────────────────────────────────────────────
+st.divider()
+st.subheader("🧊 3D Surfaces")
+tab_3d_1, tab_3d_2, tab_3d_3 = st.tabs(["Gamma Surface", "IV Smile", "Time Evolution"])
+
+surf_df = st.session_state.df.copy()
+surf_df = surf_df[abs(surf_df["strike"] - spot) <= spot * 0.05]
+surf_calls = surf_df[surf_df["type"] == "call"].sort_values("strike")
+surf_puts  = surf_df[surf_df["type"] == "put"].sort_values("strike")
+
+with tab_3d_1:
+    fig_3d_gamma = go.Figure()
+    fig_3d_gamma.add_trace(go.Scatter3d(
+        x=surf_calls["strike"], y=[1] * len(surf_calls), z=surf_calls["bs_gamma"],
+        mode="lines+markers", name="Call Gamma",
+        line=dict(color="#00ff88", width=4),
+        marker=dict(size=4, color=surf_calls["bs_gamma"], colorscale="Viridis"),
+    ))
+    fig_3d_gamma.add_trace(go.Scatter3d(
+        x=surf_puts["strike"], y=[0] * len(surf_puts), z=surf_puts["bs_gamma"],
+        mode="lines+markers", name="Put Gamma",
+        line=dict(color="#ff4444", width=4),
+        marker=dict(size=4, color=surf_puts["bs_gamma"], colorscale="Plasma"),
+    ))
+    if not surf_calls.empty and not surf_puts.empty:
+        strikes = sorted(set(surf_calls["strike"]) & set(surf_puts["strike"]))
+        if len(strikes) >= 3:
+            z_calls = surf_calls[surf_calls["strike"].isin(strikes)].set_index("strike")["bs_gamma"]
+            z_puts  = surf_puts[surf_puts["strike"].isin(strikes)].set_index("strike")["bs_gamma"]
+            z_grid  = np.array([z_calls.reindex(strikes).fillna(0).values,
+                                z_puts.reindex(strikes).fillna(0).values])
+            fig_3d_gamma.add_trace(go.Surface(
+                x=strikes, y=[1, 0], z=z_grid,
+                colorscale="Viridis", opacity=0.6, showscale=True, name="Gamma Surface",
+            ))
+    fig_3d_gamma.update_layout(
+        template="plotly_dark", height=500,
+        scene=dict(xaxis_title="Strike", yaxis_title="Type (1=Call 0=Put)",
+                   zaxis_title="Gamma", bgcolor="#0e1117"),
+        margin=dict(l=0, r=0, t=30, b=0),
+    )
+    st.plotly_chart(fig_3d_gamma, use_container_width=True)
+
+with tab_3d_2:
+    fig_3d_iv = go.Figure()
+    fig_3d_iv.add_trace(go.Scatter3d(
+        x=surf_calls["strike"], y=[1] * len(surf_calls), z=surf_calls["iv"],
+        mode="lines+markers", name="Call IV",
+        line=dict(color="#00ff88", width=4),
+        marker=dict(size=4, color=surf_calls["iv"], colorscale="RdYlGn"),
+    ))
+    fig_3d_iv.add_trace(go.Scatter3d(
+        x=surf_puts["strike"], y=[0] * len(surf_puts), z=surf_puts["iv"],
+        mode="lines+markers", name="Put IV",
+        line=dict(color="#ff4444", width=4),
+        marker=dict(size=4, color=surf_puts["iv"], colorscale="RdYlGn"),
+    ))
+    if not surf_calls.empty and not surf_puts.empty:
+        strikes = sorted(set(surf_calls["strike"]) & set(surf_puts["strike"]))
+        if len(strikes) >= 3:
+            z_iv_calls = surf_calls[surf_calls["strike"].isin(strikes)].set_index("strike")["iv"]
+            z_iv_puts  = surf_puts[surf_puts["strike"].isin(strikes)].set_index("strike")["iv"]
+            z_iv_grid  = np.array([z_iv_calls.reindex(strikes).fillna(0).values,
+                                   z_iv_puts.reindex(strikes).fillna(0).values])
+            fig_3d_iv.add_trace(go.Surface(
+                x=strikes, y=[1, 0], z=z_iv_grid,
+                colorscale="RdYlGn", opacity=0.6, showscale=True, name="IV Surface",
+            ))
+    fig_3d_iv.update_layout(
+        template="plotly_dark", height=500,
+        scene=dict(xaxis_title="Strike", yaxis_title="Type (1=Call 0=Put)",
+                   zaxis_title="Implied Vol", bgcolor="#0e1117"),
+        margin=dict(l=0, r=0, t=30, b=0),
+    )
+    st.plotly_chart(fig_3d_iv, use_container_width=True)
+
+with tab_3d_3:
+    import os, glob
+    snapshot_files = sorted(glob.glob("snapshots/snapshot_*.parquet"))
+    if len(snapshot_files) < 2:
+        st.info("📦 No intraday snapshots yet. Run `collector.py` during market hours to build the time axis. Snapshots save every 30s and will populate this chart automatically.")
+    else:
+        frames = [pd.read_parquet(f) for f in snapshot_files]
+        hist = pd.concat(frames, ignore_index=True)
+        for opt_type, color in [("call", "Viridis"), ("put", "Plasma")]:
+            subset = hist[hist["type"] == opt_type]
+            if subset.empty:
+                continue
+            pivot = subset.pivot_table(index="timestamp", columns="strike", values="bs_gamma", aggfunc="mean").fillna(0)
+            fig_time = go.Figure(data=[go.Surface(
+                x=list(pivot.columns),
+                y=list(range(len(pivot))),
+                z=pivot.values,
+                colorscale=color, opacity=0.85, showscale=True,
+            )])
+            fig_time.update_layout(
+                template="plotly_dark", height=520,
+                title=f"{opt_type.capitalize()} Gamma Evolution Intraday",
+                scene=dict(xaxis_title="Strike", yaxis_title="Time (snapshot #)",
+                           zaxis_title="Gamma", bgcolor="#0e1117"),
+                margin=dict(l=0, r=0, t=40, b=0),
+            )
+            st.plotly_chart(fig_time, use_container_width=True)
+
 # ── Contract Scanner Table ───────────────────────────────────────────
+st.divider()
 st.subheader("🎯 Contract Scanner")
 
 display_cols = [
