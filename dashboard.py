@@ -237,7 +237,7 @@ st.divider()
 # ── 3D Surface Tab ───────────────────────────────────────────────────
 st.divider()
 st.subheader("🧊 3D Surfaces")
-tab_3d_1, tab_3d_2, tab_3d_3 = st.tabs(["Gamma Surface", "IV Smile", "Time Evolution"])
+tab_3d_1, tab_3d_2, tab_3d_3, tab_3d_4 = st.tabs(["Gamma Surface", "IV Smile", "Speed Surface", "Time Evolution"])
 
 surf_df = st.session_state.df.copy()
 surf_df = surf_df[abs(surf_df["strike"] - spot) <= spot * 0.05]
@@ -311,6 +311,77 @@ with tab_3d_2:
     st.plotly_chart(fig_3d_iv, use_container_width=True)
 
 with tab_3d_3:
+    # Speed = dGamma/dS: positive = gamma accelerating (hold/entry), negative = decelerating (exit)
+    if "bs_speed" not in surf_df.columns and "speed" in surf_df.columns:
+        surf_df = surf_df.rename(columns={"speed": "bs_speed"})
+
+    speed_col = "bs_speed" if "bs_speed" in surf_df.columns else None
+
+    if speed_col is None:
+        st.info("Speed data not available in current scan. Ensure greeks_engine returns 'speed'.")
+    else:
+        sp_calls = surf_df[surf_df["type"] == "call"].sort_values("strike")
+        sp_puts  = surf_df[surf_df["type"] == "put"].sort_values("strike")
+
+        fig_3d_speed = go.Figure()
+
+        # Color by sign: green = accelerating (entry zone), red = decelerating (exit zone)
+        call_colors = sp_calls[speed_col].apply(lambda v: "#00ff88" if v > 0 else "#ff4444")
+        put_colors  = sp_puts[speed_col].apply(lambda v: "#00ff88" if v > 0 else "#ff4444")
+
+        fig_3d_speed.add_trace(go.Scatter3d(
+            x=sp_calls["strike"], y=[1] * len(sp_calls), z=sp_calls[speed_col],
+            mode="lines+markers", name="Call Speed",
+            line=dict(color="#00ff88", width=4),
+            marker=dict(size=5, color=sp_calls[speed_col], colorscale="RdYlGn",
+                        cmin=sp_calls[speed_col].min(), cmax=sp_calls[speed_col].max()),
+        ))
+        fig_3d_speed.add_trace(go.Scatter3d(
+            x=sp_puts["strike"], y=[0] * len(sp_puts), z=sp_puts[speed_col],
+            mode="lines+markers", name="Put Speed",
+            line=dict(color="#ff4444", width=4),
+            marker=dict(size=5, color=sp_puts[speed_col], colorscale="RdYlGn",
+                        cmin=sp_puts[speed_col].min(), cmax=sp_puts[speed_col].max()),
+        ))
+
+        # Surface mesh
+        strikes = sorted(set(sp_calls["strike"]) & set(sp_puts["strike"]))
+        if len(strikes) >= 3:
+            z_sp_calls = sp_calls[sp_calls["strike"].isin(strikes)].set_index("strike")[speed_col]
+            z_sp_puts  = sp_puts[sp_puts["strike"].isin(strikes)].set_index("strike")[speed_col]
+            z_sp_grid  = np.array([z_sp_calls.reindex(strikes).fillna(0).values,
+                                   z_sp_puts.reindex(strikes).fillna(0).values])
+            fig_3d_speed.add_trace(go.Surface(
+                x=strikes, y=[1, 0], z=z_sp_grid,
+                colorscale="RdYlGn", opacity=0.65, showscale=True,
+                name="Speed Surface",
+                # Zero plane reference
+            ))
+
+        # Zero plane — shows the inflection line clearly
+        if len(strikes) >= 2:
+            fig_3d_speed.add_trace(go.Surface(
+                x=[min(strikes), max(strikes)],
+                y=[0, 1],
+                z=[[0, 0], [0, 0]],
+                colorscale=[[0, "rgba(255,221,0,0.15)"], [1, "rgba(255,221,0,0.15)"]],
+                showscale=False, opacity=0.3, name="Zero (inflection)",
+            ))
+
+        fig_3d_speed.update_layout(
+            template="plotly_dark", height=520,
+            scene=dict(
+                xaxis_title="Strike",
+                yaxis_title="Type (1=Call 0=Put)",
+                zaxis_title="Speed (dΓ/dS)",
+                bgcolor="#0e1117",
+            ),
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.caption("🟢 Above zero = gamma still accelerating → hold/entry | 🔴 Below zero = gamma decelerating → approach exit")
+        st.plotly_chart(fig_3d_speed, use_container_width=True)
+
+with tab_3d_4:
     import os, glob
     snapshot_files = sorted(glob.glob("snapshots/snapshot_*.parquet"))
     if len(snapshot_files) < 2:

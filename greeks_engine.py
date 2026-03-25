@@ -60,7 +60,9 @@ def bs_greeks(S, K, r, sigma, option_type="call"):
     else:
         rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
 
-    # Speed — third derivative (rate of gamma change with spot)
+    # Speed — 3rd derivative of option price w.r.t. spot (d³V/dS³ = dGamma/dS)
+    # Positive: gamma still accelerating toward ATM (entry zone)
+    # Negative: gamma decelerating, peak passed (exit zone)
     speed = -(gamma / S) * (d1 / (sigma * np.sqrt(T)) + 1)
 
     # Vanna — sensitivity of delta to IV (or gamma to spot cross partial)

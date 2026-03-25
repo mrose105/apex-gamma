@@ -141,6 +141,9 @@ def build_chain_df(chain, spot, r=0.05):
                 "delta_diff":    diff["delta"] if diff else None,
                 # Signal
                 "signal":        signal,
+                "bs_speed":      bs["speed"] if bs else None,
+                "bs_vanna":      bs["vanna"] if bs else None,
+                "bs_charm":      bs["charm"] if bs else None,
                 "hours_left":    bs["T"] if bs else None,
             })
 
