@@ -224,11 +224,15 @@ def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call", s
     else:  # put
         is_slightly_otm = 1.0 < moneyness <= (1.0 / config.ENTRY_MONEYNESS_THRESHOLD)
 
-        # Speed-based early signal for puts
+        # Speed-based signal for puts — note sign inversion vs calls:
+        # speed = dGamma/dS measures gamma change as spot RISES.
+        # For puts, gamma accelerates as spot FALLS toward strike, so the
+        # accelerating direction is speed < 0 (gamma up as S down) and
+        # decelerating direction is speed > 0 (gamma falling as S falls).
         if speed is not None:
-            if speed > 0 and is_slightly_otm:
+            if speed < 0 and is_slightly_otm:   # gamma accelerating as spot falls → entry
                 return "ENTRY"
-            if speed < 0 and moneyness < 1.001:
+            if speed > 0 and moneyness < 1.001:  # gamma decelerating as spot falls → exit
                 return "EXIT"
 
         # Fallback moneyness-based logic
