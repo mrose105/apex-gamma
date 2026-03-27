@@ -10,14 +10,15 @@ TZ_ET = ZoneInfo("America/New_York")
 # ── Black-Scholes Greeks ─────────────────────────────────────────────
 
 def time_to_expiry() -> float:
-    """Returns fraction of trading year remaining for 0DTE (in years).
+    """Returns fraction of calendar year remaining for 0DTE (in years).
+    Uses calendar-year convention (365 * 24 * 3600) to match market-quoted IV.
     Uses ET timezone so the result is correct on any host machine.
     """
     now = datetime.now(TZ_ET)
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
     remaining_secs = max((market_close - now).total_seconds(), 60)  # floor at 1 min
-    trading_year = 252 * 6.5 * 3600  # seconds in a trading year
-    return remaining_secs / trading_year
+    calendar_year = 365 * 24 * 3600
+    return remaining_secs / calendar_year
 
 
 def bs_greeks(S, K, r, sigma, option_type="call"):
@@ -90,7 +91,7 @@ def bs_greeks(S, K, r, sigma, option_type="call"):
         "speed": round(speed, 6),
         "vanna": round(vanna, 4),
         "charm": round(charm, 6),
-        "T":     round(T * 252 * 6.5, 4),  # trading hours remaining
+        "T":     round(T * 365 * 24, 4),  # calendar hours remaining
     }
 
 
