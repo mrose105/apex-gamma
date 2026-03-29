@@ -16,7 +16,10 @@ def time_to_expiry() -> float:
     """
     now = datetime.now(TZ_ET)
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-    remaining_secs = max((market_close - now).total_seconds(), 60)  # floor at 1 min
+    remaining_secs = (market_close - now).total_seconds()
+    if remaining_secs <= 0:
+        return None  # market closed — callers must handle None
+    remaining_secs = max(remaining_secs, 60)  # floor at 1 min to avoid d1 explosion
     calendar_year = 365 * 24 * 3600
     return remaining_secs / calendar_year
 
@@ -77,9 +80,10 @@ def bs_greeks(S, K, r, sigma, option_type="call"):
 
     # Charm — dDelta/dt per calendar day
     # Canonical (no dividends): -N'(d1)·[2rT - d2·σ·√T] / (2T·σ·√T)
+    T_charm = max(T, 1 / 525600)  # floor at 1 min in years (1/365/24/60)
     charm = -norm.pdf(d1) * (
-        (2 * r * T - d2 * sigma * sqrt_T) /
-        (2 * T * sigma * sqrt_T)
+        (2 * r * T_charm - d2 * sigma * np.sqrt(T_charm)) /
+        (2 * T_charm * sigma * np.sqrt(T_charm))
     ) / 365
 
     return {
@@ -104,7 +108,7 @@ def implied_vol(market_price, S, K, r, option_type="call", tol=1e-6):
     T is captured once and shared with fair_value_bs to avoid timestamp drift.
     """
     T = time_to_expiry()
-    if T <= 0 or market_price <= 0:
+    if T is None or T <= 0 or market_price <= 0:
         return None
 
     # Arbitrage bounds check
@@ -156,7 +160,7 @@ def fair_value_bs(S, K, r, sigma, option_type="call", T=None):
     """
     if T is None:
         T = time_to_expiry()
-    if T <= 0 or sigma <= 0:
+    if T is None or T <= 0 or sigma <= 0:
         return None
     sqrt_T = np.sqrt(T)
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
@@ -203,48 +207,46 @@ def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call", s
     if option_type == "call":
         is_slightly_otm = config.ENTRY_MONEYNESS_THRESHOLD <= moneyness < 1.0
 
-        # Speed-based early signal: detect gamma inflection before moneyness threshold
-        if speed is not None:
-            if speed > 0 and is_slightly_otm:
-                return "ENTRY"
-            if speed < 0 and moneyness > 0.999:
-                return "EXIT"
+        # Speed-based ENTRY signal (before ATM)
+        if speed is not None and speed > 0 and is_slightly_otm:
+            return "ENTRY"
 
-        # Fallback moneyness-based logic
+        # Fallback moneyness-based ENTRY
         if is_slightly_otm:
             return "ENTRY"
 
-        # Peak zone: at or just past ATM, gamma near max
+        # PEAK zone checked FIRST before speed-based EXIT (fixes dead-code ordering bug)
         if 0.98 <= moneyness <= 1.005 and gamma_ratio >= 0.95:
             return "PEAK"
 
-        # Exit: call gone ITM past snipe threshold, gamma decaying
+        # Speed-based EXIT — only fires if past PEAK (gamma_ratio already decayed)
+        if speed is not None and speed < 0 and moneyness > 0.999 and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
+            return "EXIT"
+
+        # Moneyness-based EXIT: call gone ITM past snipe threshold, gamma decaying
         if moneyness >= config.SNIPE_EXIT_MONEYNESS_CALL and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
             return "EXIT"
 
     else:  # put
         is_slightly_otm = 1.0 < moneyness <= (1.0 / config.ENTRY_MONEYNESS_THRESHOLD)
 
-        # Speed-based signal for puts — note sign inversion vs calls:
-        # speed = dGamma/dS measures gamma change as spot RISES.
-        # For puts, gamma accelerates as spot FALLS toward strike, so the
-        # accelerating direction is speed < 0 (gamma up as S down) and
-        # decelerating direction is speed > 0 (gamma falling as S falls).
-        if speed is not None:
-            if speed < 0 and is_slightly_otm:   # gamma accelerating as spot falls → entry
-                return "ENTRY"
-            if speed > 0 and moneyness < 1.001:  # gamma decelerating as spot falls → exit
-                return "EXIT"
+        # Speed-based ENTRY for puts (gamma accelerating as spot falls)
+        if speed is not None and speed < 0 and is_slightly_otm:
+            return "ENTRY"
 
-        # Fallback moneyness-based logic
+        # Fallback moneyness-based ENTRY
         if is_slightly_otm:
             return "ENTRY"
 
-        # Peak zone: at or just past ATM for puts
+        # PEAK zone checked FIRST before speed-based EXIT (fixes dead-code ordering bug)
         if 0.995 <= moneyness <= 1.02 and gamma_ratio >= 0.95:
             return "PEAK"
 
-        # Exit: put gone ITM past snipe threshold, gamma decaying
+        # Speed-based EXIT — only fires if past PEAK
+        if speed is not None and speed > 0 and moneyness < 1.001 and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
+            return "EXIT"
+
+        # Moneyness-based EXIT: put gone ITM past snipe threshold, gamma decaying
         if moneyness <= config.SNIPE_EXIT_MONEYNESS_PUT and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
             return "EXIT"
 

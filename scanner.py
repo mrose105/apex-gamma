@@ -14,7 +14,7 @@ def get_spy_chain():
 
     request = OptionChainRequest(
         underlying_symbol=config.UNDERLYING,
-        expiration_date=config.EXPIRY,
+        expiration_date=config.today_et(),  # evaluated fresh each scan
     )
 
     chain = client.get_option_chain(request)
@@ -35,7 +35,9 @@ def get_spot_price():
 
 # ── Parse Chain into DataFrame ───────────────────────────────────────
 
-def build_chain_df(chain, spot, r=0.05):
+def build_chain_df(chain, spot, r=None):
+    if r is None:
+        r = config.RISK_FREE_RATE
     """
     For each contract in chain, compute:
     - BS Greeks
@@ -60,7 +62,11 @@ def build_chain_df(chain, spot, r=0.05):
                 q = snapshot.latest_quote
                 if not q:
                     continue
-                mid = (q.bid_price + q.ask_price) / 2
+                bid = q.bid_price or 0
+                ask = q.ask_price or 0
+                mid = (bid + ask) / 2
+                if mid <= 0:
+                    continue
                 iv = ge.implied_vol(mid, spot, K, r, opt_type)
             if not iv:
                 continue
@@ -165,6 +171,26 @@ def build_chain_df(chain, spot, r=0.05):
 
 # ── Main Scanner Run ─────────────────────────────────────────────────
 
+def get_market_phase():
+    """
+    Returns current trading phase based on ET time.
+    NORMAL   — entries and exits active
+    NO_ENTRY — after 3:35pm, no new entries (exits still fire)
+    CLOSE    — after 3:38pm, auto-liquidate all expiring positions
+    CLOSED   — after 4:00pm, scanner should not run
+    """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York")).time()
+    if now >= dtime(16, 0):
+        return "CLOSED"
+    if now >= dtime(15, 38):
+        return "CLOSE"
+    if now >= dtime(15, 35):
+        return "NO_ENTRY"
+    return "NORMAL"
+
+
 def run_scan():
     """Full scan: fetch chain, get spot, build df."""
     print(f"Fetching SPY 0DTE chain for {config.EXPIRY}...")
@@ -172,8 +198,24 @@ def run_scan():
     print(f"SPY Spot: ${spot}")
     chain = get_spy_chain()
     print(f"Contracts fetched: {len(chain)}")
+    phase = get_market_phase()
     df = build_chain_df(chain, spot)
-    print(f"Contracts processed: {len(df)}")
+
+    if phase == "CLOSED":
+        print("Market closed — scanner halted.")
+        return df, spot
+
+    if phase == "NO_ENTRY":
+        print("⚠️  3:35pm cutoff — suppressing ENTRY signals, exits only.")
+        df.loc[df["signal"] == "ENTRY", "signal"] = "HOLD"
+
+    if phase == "CLOSE":
+        print("🔴 3:38pm — AUTO-LIQUIDATE all expiring positions.")
+        df["signal"] = df["signal"].apply(
+            lambda x: "EXIT" if x in ("ENTRY", "PEAK", "HOLD") else x
+        )
+
+    print(f"Contracts processed: {len(df)} | Phase: {phase}")
     return df, spot
 
 if __name__ == "__main__":
