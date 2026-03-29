@@ -111,11 +111,24 @@ def build_chain_df(chain, spot, r=None):
             fv = ge.fair_value_bs(S=spot, K=K, r=r, sigma=iv, option_type=opt_type)
             edge = ge.pricing_edge(mid_price, fv)
 
+            # Gamma break-even move — minimum SPY $ move per 30s to cover theta
+            breakeven = ge.gamma_breakeven_move(
+                bs["gamma"] if bs else 0,
+                bs["theta"] if bs else 0,
+                interval_seconds=config.REFRESH_INTERVAL,
+            ) if bs else None
+
             # Gamma arc signal
             peak = gamma_peaks[opt_type]
             gamma_val = bs["gamma"] if bs else 0
             speed_val = bs["speed"] if bs else None
-            signal = ge.gamma_arc_signal(gamma_val, peak, moneyness, option_type=opt_type, speed=speed_val)
+            vanna_val = bs["vanna"] if bs else None
+            signal = ge.gamma_arc_signal(
+                gamma_val, peak, moneyness,
+                option_type=opt_type,
+                speed=speed_val,
+                vanna=vanna_val,
+            )
 
             rows.append({
                 "symbol":        symbol,
@@ -147,6 +160,7 @@ def build_chain_df(chain, spot, r=None):
                 "bs_vanna":      bs["vanna"] if bs else None,
                 "bs_charm":      bs["charm"] if bs else None,
                 "hours_left":    bs["T"] if bs else None,
+                "gamma_breakeven": breakeven,  # min SPY $ move/interval to cover theta
             })
 
         except Exception as e:

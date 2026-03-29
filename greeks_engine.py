@@ -184,16 +184,59 @@ def pricing_edge(market_price, fair_value):
     return {"edge": edge, "edge_pct": pct}
 
 
+# ── Gamma Break-Even Move ────────────────────────────────────────────
+
+def gamma_breakeven_move(gamma, theta, interval_seconds=30) -> float:
+    """
+    Minimum SPY $ move per scan interval needed for gamma P&L to cover theta cost.
+
+    Derived from: 0.5 × Γ × (ΔS)² = |Θ| × dt
+    Solving for ΔS: break_even = sqrt(2 × |Θ| × dt / Γ)
+
+    Γ     = gamma (per share)
+    Θ     = theta (per calendar day, per share — negative value)
+    dt    = fraction of day per scan interval
+
+    Returns break-even SPY move in dollars.
+    If realized SPY moves per interval exceed this, gamma is cheap to buy.
+    """
+    if gamma <= 0 or theta >= 0:
+        return float("inf")
+    dt = interval_seconds / 86400  # fraction of calendar day
+    theta_cost = abs(theta) * dt
+    return round((2 * theta_cost / gamma) ** 0.5, 4)
+
+
 # ── Gamma Arc Signals ────────────────────────────────────────────────
 
-def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call", speed=None):
+def gamma_arc_signal(
+    current_gamma,
+    peak_gamma,
+    moneyness,
+    option_type="call",
+    speed=None,
+    vanna=None,
+):
     """
     Returns entry/exit signal based on gamma arc logic.
-    moneyness  = S / K (>1 = ITM for calls, <1 = ITM for puts)
-    option_type = "call" or "put"
-    speed      = dGamma/dS from bs_greeks — used to detect gamma peak before it happens
-                 positive = gamma still accelerating (hold/entry)
-                 negative = gamma decelerating (approaching exit)
+
+    moneyness   = S / K  (>1 = ITM for calls, <1 = ITM for puts)
+    option_type = "call" | "put"
+    speed       = dGamma/dS (d³V/dS³) — sign flip marks the exact gamma peak:
+                    calls: speed > 0 → gamma accelerating → ENTRY zone
+                           speed < 0 → gamma decelerating → EXIT immediately
+                    puts:  speed < 0 → gamma accelerating (spot falling toward K) → ENTRY
+                           speed > 0 → gamma decelerating → EXIT immediately
+    vanna       = d²V/dSdσ — amplifies entry quality on high-vol days.
+                  Positive vanna on a call = IV expansion pushes delta higher.
+                  Used as a tiebreaker: prefer high-|vanna| contracts at entry.
+                  (Signal itself is not blocked by vanna — it is logged upstream.)
+
+    Key design principle:
+      Speed sign flip IS the convergence signal. It is a LEADING indicator
+      of the gamma peak. Do NOT require gamma_ratio decay as a confirmation —
+      that turns the leading indicator into a lagging one and defeats its purpose.
+      gamma_ratio is reserved for the moneyness-based coarse fallback exit only.
     """
     if not current_gamma or not peak_gamma:
         return "HOLD"
@@ -207,46 +250,50 @@ def gamma_arc_signal(current_gamma, peak_gamma, moneyness, option_type="call", s
     if option_type == "call":
         is_slightly_otm = config.ENTRY_MONEYNESS_THRESHOLD <= moneyness < 1.0
 
-        # Speed-based ENTRY signal (before ATM)
+        # ── ENTRY: speed > 0 = gamma still accelerating toward ATM ──
         if speed is not None and speed > 0 and is_slightly_otm:
             return "ENTRY"
 
-        # Fallback moneyness-based ENTRY
-        if is_slightly_otm:
+        # Moneyness fallback ENTRY (no speed data available)
+        if is_slightly_otm and speed is None:
             return "ENTRY"
 
-        # PEAK zone checked FIRST before speed-based EXIT (fixes dead-code ordering bug)
+        # ── PEAK: gamma at maximum, speed near zero ──
         if 0.98 <= moneyness <= 1.005 and gamma_ratio >= 0.95:
             return "PEAK"
 
-        # Speed-based EXIT — only fires if past PEAK (gamma_ratio already decayed)
-        if speed is not None and speed < 0 and moneyness > 0.999 and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
+        # ── EXIT: speed < 0 = gamma peaked and now falling.
+        #    No gamma_ratio requirement — speed sign flip IS the exit trigger.
+        #    This fires at the gamma convergence point, not after decay. ──
+        if speed is not None and speed < 0 and moneyness > 0.997:
             return "EXIT"
 
-        # Moneyness-based EXIT: call gone ITM past snipe threshold, gamma decaying
+        # Coarse moneyness fallback EXIT (if speed unavailable)
+        # gamma_ratio guard here only — this is the lagging safety net
         if moneyness >= config.SNIPE_EXIT_MONEYNESS_CALL and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
             return "EXIT"
 
     else:  # put
         is_slightly_otm = 1.0 < moneyness <= (1.0 / config.ENTRY_MONEYNESS_THRESHOLD)
 
-        # Speed-based ENTRY for puts (gamma accelerating as spot falls)
+        # ── ENTRY: speed < 0 = gamma accelerating as spot falls toward K ──
         if speed is not None and speed < 0 and is_slightly_otm:
             return "ENTRY"
 
-        # Fallback moneyness-based ENTRY
-        if is_slightly_otm:
+        # Moneyness fallback ENTRY (no speed data)
+        if is_slightly_otm and speed is None:
             return "ENTRY"
 
-        # PEAK zone checked FIRST before speed-based EXIT (fixes dead-code ordering bug)
+        # ── PEAK: gamma at maximum ──
         if 0.995 <= moneyness <= 1.02 and gamma_ratio >= 0.95:
             return "PEAK"
 
-        # Speed-based EXIT — only fires if past PEAK
-        if speed is not None and speed > 0 and moneyness < 1.001 and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
+        # ── EXIT: speed > 0 = gamma peaked and now falling (for puts).
+        #    Fires when put has gone far enough ITM that d1 < -σ√T. ──
+        if speed is not None and speed > 0 and moneyness < 1.003:
             return "EXIT"
 
-        # Moneyness-based EXIT: put gone ITM past snipe threshold, gamma decaying
+        # Coarse moneyness fallback EXIT
         if moneyness <= config.SNIPE_EXIT_MONEYNESS_PUT and gamma_ratio < config.GAMMA_PEAK_DECAY_TRIGGER:
             return "EXIT"
 
