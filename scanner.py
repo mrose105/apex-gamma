@@ -36,16 +36,12 @@ def get_spot_price():
 # ── Parse Chain into DataFrame ───────────────────────────────────────
 
 def build_chain_df(chain, spot, r=None):
+    """
+    For each contract in chain, compute BS Greeks, broker Greeks,
+    fair value, pricing edge, and gamma arc signal.
+    """
     if r is None:
         r = config.RISK_FREE_RATE
-    """
-    For each contract in chain, compute:
-    - BS Greeks
-    - Broker Greeks
-    - Greeks diff
-    - Fair value & pricing edge
-    - Gamma arc signal
-    """
     rows = []
 
     # Track gamma peaks per option type for arc signal
