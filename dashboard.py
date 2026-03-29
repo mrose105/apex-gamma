@@ -75,11 +75,33 @@ if "spot" not in st.session_state:
     st.session_state.spot = None
 if "last_scan" not in st.session_state:
     st.session_state.last_scan = None
+if "snapshot_mode" not in st.session_state:
+    st.session_state.snapshot_mode = None
 
 # ── Scan Logic ───────────────────────────────────────────────────────
+def load_latest_snapshot():
+    """Fall back to the most recent parquet snapshot when market is closed."""
+    import glob, os
+    files = sorted(glob.glob("snapshots/snapshot_*.parquet"))
+    if not files:
+        return None, None
+    df = pd.read_parquet(files[-1])
+    spot = df["spot"].iloc[0] if "spot" in df.columns else None
+    ts   = df["timestamp"].iloc[0] if "timestamp" in df.columns else os.path.basename(files[-1])
+    return df, spot, ts
+
 def do_scan():
     with st.spinner("Scanning SPY 0DTE chain..."):
         df, spot = scanner.run_scan()
+        if df.empty or "signal" not in df.columns:
+            result = load_latest_snapshot()
+            if result and result[0] is not None:
+                df, spot, snap_ts = result
+                st.session_state.snapshot_mode = f"Market closed — showing last snapshot ({snap_ts})"
+            else:
+                st.session_state.snapshot_mode = "Market closed — no snapshots available yet"
+        else:
+            st.session_state.snapshot_mode = None
         st.session_state.df = df
         st.session_state.spot = spot
         st.session_state.last_scan = datetime.now().strftime("%H:%M:%S")
@@ -101,6 +123,13 @@ if st.session_state.df is None:
 
 df = st.session_state.df.copy()
 spot = st.session_state.spot
+
+if st.session_state.snapshot_mode:
+    st.info(f"📦 {st.session_state.snapshot_mode}")
+
+if df.empty or "signal" not in df.columns:
+    st.warning("No data available. Hit **Run Scan** or start `collector.py` during market hours to build snapshots.")
+    st.stop()
 
 # ── Apply Filters ────────────────────────────────────────────────────
 if opt_type_filter == "Calls":
