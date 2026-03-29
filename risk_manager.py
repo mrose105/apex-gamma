@@ -29,14 +29,16 @@ import pandas as pd
 
 import config
 from position_manager import PositionManager
+from vol_tracker import RealizedVolTracker
 
 log = logging.getLogger(__name__)
 
 
 class RiskManager:
 
-    def __init__(self, pm: PositionManager):
-        self.pm = pm
+    def __init__(self, pm: PositionManager, vol_tracker: RealizedVolTracker = None):
+        self.pm  = pm
+        self.vt  = vol_tracker or RealizedVolTracker()
 
     # ── Contract-Level Checks ────────────────────────────────────────
 
@@ -75,6 +77,24 @@ class RiskManager:
         ratio = abs(theta) / gamma
         if ratio > config.MAX_THETA_GAMMA_RATIO:
             return False, f"|theta|/gamma={ratio:.2f} > {config.MAX_THETA_GAMMA_RATIO} (gamma overpriced)"
+        return True, ""
+
+    def _check_vol_regime(self, row: pd.Series) -> Tuple[bool, str]:
+        """
+        Reject entry if realized vol regime is EXPENSIVE.
+        Compares mean realized SPY move per interval vs gamma break-even.
+        Passes through if tracker doesn't have enough history yet (UNKNOWN).
+        """
+        if not self.vt.is_ready():
+            return True, ""  # not enough history yet — don't block
+        breakeven = row.get("gamma_breakeven", None)
+        regime = self.vt.vol_regime(breakeven)
+        if regime == "EXPENSIVE":
+            move = self.vt.realized_move_per_interval()
+            return False, (
+                f"vol regime EXPENSIVE: realized_move=${move:.4f} < "
+                f"gamma_breakeven=${breakeven:.4f} (buying overpriced gamma)"
+            )
         return True, ""
 
     def _check_vix(self, vix: float | None) -> Tuple[bool, str]:
@@ -153,6 +173,7 @@ class RiskManager:
             lambda: self._check_spread(row),
             lambda: self._check_open_interest(row),
             lambda: self._check_theta_gamma_ratio(row),
+            lambda: self._check_vol_regime(row),   # realized vs implied gamma cost
             lambda: self._check_vix(vix),
             lambda: self.check_portfolio_limits(
                 self.pm.portfolio_greeks(), row, config.MAX_CONTRACTS_PER_TRADE

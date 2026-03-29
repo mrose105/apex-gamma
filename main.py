@@ -34,6 +34,7 @@ import execution as ex
 import scanner
 from position_manager import PositionManager
 from risk_manager import RiskManager
+from vol_tracker import RealizedVolTracker
 
 # ── Logging ──────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -188,7 +189,8 @@ def run(scan_only: bool = False) -> None:
     log.info("=" * 60)
 
     pm = PositionManager()
-    rm = RiskManager(pm)
+    vt = RealizedVolTracker(window=20, interval_seconds=config.REFRESH_INTERVAL)
+    rm = RiskManager(pm, vt)
 
     if not scan_only:
         acct = ex.get_account_info()
@@ -221,7 +223,16 @@ def run(scan_only: bool = False) -> None:
             continue
 
         vix = _fetch_vix()
-        log.info("SPY spot=$%.2f | VIX=%s | %s", spot, f"{vix:.1f}" if vix else "N/A", pm.summary())
+        vt.update(spot)
+        vol_stats = vt.stats()
+        log.info(
+            "SPY spot=$%.2f | VIX=%s | realized_move=$%s | realized_vol=%s%% | %s",
+            spot,
+            f"{vix:.1f}" if vix else "N/A",
+            vol_stats["realized_move_30s"] or "...",
+            vol_stats["realized_vol_pct"] or "...",
+            pm.summary(),
+        )
 
         # 1. Exits first — always check before entries
         process_exits(pm, rm, df, scan_only)
